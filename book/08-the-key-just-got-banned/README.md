@@ -634,4 +634,5 @@ v0.8 之后，渠道切换是自动的。单 Key 故障时网关在毫秒级换�
 ---
 
 > 本章来自《AI Token 中转站实战：从 0 搭建企业级 LLM 网关》开源版 · 作者「递归客」  
-> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)
+> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)  
+> 源码仓库：[github.com/diguike/book-llm-gateway](https://github.com/diguike/book-llm-gateway)

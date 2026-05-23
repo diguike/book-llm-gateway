@@ -857,4 +857,5 @@ v0.3 之后，协议层已经具备三家上游（OpenAI / DeepSeek / Anthropic�
 ---
 
 > 本章来自《AI Token 中转站实战：从 0 搭建企业级 LLM 网关》开源版 · 作者「递归客」  
-> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)
+> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)  
+> 源码仓库：[github.com/diguike/book-llm-gateway](https://github.com/diguike/book-llm-gateway)

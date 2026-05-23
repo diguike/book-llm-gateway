@@ -814,4 +814,5 @@ v0.5 之后, 网关从「能拦」走到「能算」: 每一分钱都能归因�
 ---
 
 > 本章来自《AI Token 中转站实战：从 0 搭建企业级 LLM 网关》开源版 · 作者「递归客」  
-> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)
+> 在线阅读完整书系：[inferloop.dev](https://inferloop.dev)  
+> 源码仓库：[github.com/diguike/book-llm-gateway](https://github.com/diguike/book-llm-gateway)
