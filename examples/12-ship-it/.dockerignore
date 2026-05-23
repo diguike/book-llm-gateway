@@ -1,0 +1,16 @@
+# 排除掉所有不需要的内容, 减小 build context.
+node_modules
+data
+.env
+.env.local
+*.log
+.DS_Store
+.git
+.gitignore
+.vscode
+.idea
+client
+tools
+README.md
+DEPLOYMENT.md
+nginx.conf.example

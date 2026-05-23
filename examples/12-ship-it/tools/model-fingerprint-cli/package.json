@@ -1,0 +1,19 @@
+{
+  "name": "model-fingerprint-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "模型指纹检测 CLI: 5 探针 (self_id / cutoff / tokenizer / refusal / math) 探测一个 OpenAI 兼容 endpoint 是否在偷换模型",
+  "type": "module",
+  "scripts": {
+    "start": "tsx cli.ts",
+    "demo": "tsx cli.ts --base-url http://localhost:14081 --claimed gpt-4o --api-key test --probes all",
+    "mock": "tsx mock-suspect-upstream.ts",
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowImportingTsExtensions cli.ts mock-suspect-upstream.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

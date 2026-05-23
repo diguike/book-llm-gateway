@@ -1,0 +1,17 @@
+{
+  "name": "prompt-cache-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "演示 prompt caching 命中 / 未命中的成本与 token 对比 (Anthropic / OpenAI 两套语义)",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowImportingTsExtensions index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

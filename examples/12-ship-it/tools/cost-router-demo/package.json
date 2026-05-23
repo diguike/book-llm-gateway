@@ -1,0 +1,17 @@
+{
+  "name": "cost-router-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "演示 cost_priority 升序选 channel + fallback 决策",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowImportingTsExtensions index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "@types/node": "^22.10.5"
+  }
+}

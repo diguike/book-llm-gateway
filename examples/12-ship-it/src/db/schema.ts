@@ -1,0 +1,530 @@
+// 第 6 章 schema: Ch5 的 orgs / users / keys / prices / usage_records 之上,
+// 仅给 keys 表加 5 个限流 + 月度配额字段 (见 0003_quota.sql).
+//
+// 不动 users / orgs / prices / usage_records 表: 限流是新维度,
+// QPS 数据放进程内存 (滑动窗口), TPM 预扣放进程内存 (60s 滚动窗口),
+// 月度配额上限是按 Key 的累计累加 - 只需要持久化「配额上限 + 累计已用」两列,
+// QPS/TPM 这些秒/分钟级窗口的状态本身不入库 (重启重置, 单进程内存即可).
+//
+// 历史字段保留:
+//   - users.balanceMicro / userMultiplier : Ch5 已有
+//   - prices / usage_records              : Ch5 已有
+//
+// 设计参考:
+//   - one-api model/log.go (单维度的 Log 表) -> 本书拆得更细: input/output 分列价 + 分列 cost
+//   - new-api pkg/billingexpr/expr.md (表达式计费) -> 本书 v0.5 用「硬编码三个倍率」简化,
+//     不引入 AST 求值; 但 prices 表的 schema 已经预留了「按时间窗热加载」, Ch10 接成本
+//     优化时可以无缝换成表达式计费.
+//
+// 关键设计:
+//   1. 所有金额字段都用 integer (微元), 不用 real/float. SQLite 的 REAL 是 IEEE 754
+//      双精度, 0.1 + 0.2 != 0.3 这种坑在累加月账单时会被放大;
+//   2. 价格表行的 effective_from / effective_to 是 unix ms, 用来精确卡时间窗.
+//      上游官方调价或运营改价都新插一行而不是 UPDATE 老行, 历史 usage_records 反查
+//      永远是「当时的价格」;
+//   3. usage_records.status 字段贯穿生命周期: reserved -> finalized / refunded / failed.
+//      reserved 行写入即代表预扣发生; finalized 是 postConsume 完成的终态.
+
+import {
+  integer,
+  sqliteTable,
+  text,
+  uniqueIndex,
+  index,
+} from 'drizzle-orm/sqlite-core';
+
+// ============================================================
+// orgs: 沿用 Ch4
+// ============================================================
+export const orgs = sqliteTable('orgs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  /** 启用 / 禁用. 禁用后所有下属 user 的 key 不能再用 (即时生效) */
+  disabledAt: integer('disabled_at'),
+  createdAt: integer('created_at').notNull(),
+});
+
+// ============================================================
+// users: Ch4 基础上新增 balanceMicro + userMultiplier
+//
+//   balanceMicro: 余额, 单位 1e-6 元. 1 元 = 1_000_000 微元.
+//                 预扣时 -= cost; 实结后 += (preReserved - actualCost) 补差.
+//
+//   userMultiplier: 用户倍率 (千分位 integer). 1000 = 1.0x (基线),
+//                   800  = 0.8x (打 8 折),
+//                   1500 = 1.5x (高价档).
+//                   final_cost = base × user_multiplier × channel_multiplier × model_multiplier.
+// ============================================================
+export const users = sqliteTable(
+  'users',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    orgId: integer('org_id')
+      .notNull()
+      .references(() => orgs.id),
+    name: text('name').notNull(),
+    email: text('email'),
+    disabledAt: integer('disabled_at'),
+    createdAt: integer('created_at').notNull(),
+
+    // ----- v0.5 新增 -----
+    /** 余额, 单位 1e-6 元. 默认 INITIAL_BALANCE_CNY × 1_000_000. */
+    balanceMicro: integer('balance_micro').notNull().default(0),
+    /** 用户倍率 (千分位 integer). 默认 1000 = 1.0x. */
+    userMultiplier: integer('user_multiplier').notNull().default(1000),
+  },
+  (table) => ({
+    emailIdx: uniqueIndex('users_org_email_idx').on(table.orgId, table.email),
+  }),
+);
+
+// ============================================================
+// keys: Ch4 基础上, v0.6 新增限流 + 月度配额五个字段
+//
+//   qps_limit              每秒最多请求 (滑动窗口判定). 0 = 不限.
+//   tpm_limit              每分钟最多 token 数 (input + output 之和). 0 = 不限.
+//                          TPM 走「预扣 + 实结」两阶段, 复用 Ch5 的计费思路.
+//   monthly_quota_micro    月度配额上限 (微元). 0 = 不限.
+//   monthly_used_micro     当月累计已用金额 (微元). postConsume 时累加.
+//   quota_reset_at         上次重置 monthly_used 的 unix ms. 跨月触发归零.
+// ============================================================
+export const keys = sqliteTable(
+  'keys',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    keyHash: text('key_hash').notNull(),
+    keyPreview: text('key_preview').notNull(),
+    name: text('name').notNull(),
+    scopes: text('scopes').notNull().default('chat'),
+    expiresAt: integer('expires_at'),
+    disabledAt: integer('disabled_at'),
+    lastUsedAt: integer('last_used_at'),
+    createdAt: integer('created_at').notNull(),
+
+    // ----- v0.6 新增 -----
+    /** 每秒最多请求数 (滑动窗口判定). 0 = 不限. */
+    qpsLimit: integer('qps_limit').notNull().default(0),
+    /** 每分钟最多 token 数 (input + output 之和). 0 = 不限. */
+    tpmLimit: integer('tpm_limit').notNull().default(0),
+    /** 月度配额上限, 单位微元. 0 = 不限. 超过返 402. */
+    monthlyQuotaMicro: integer('monthly_quota_micro').notNull().default(0),
+    /** 当月累计已用金额, 单位微元. postConsume 时累加, 跨月时归零. */
+    monthlyUsedMicro: integer('monthly_used_micro').notNull().default(0),
+    /** 上次重置 monthly_used 的 unix ms. 0 = 从未重置. */
+    quotaResetAt: integer('quota_reset_at').notNull().default(0),
+  },
+  (table) => ({
+    keyHashIdx: uniqueIndex('keys_key_hash_idx').on(table.keyHash),
+    userIdx: index('keys_user_idx').on(table.userId),
+  }),
+);
+
+// ============================================================
+// prices: 价格表
+//
+//   一行 = (model, provider, 有效时间窗) 三元组下的「输入 + 输出」两路单价.
+//   新调价时插入新行而不是 UPDATE 老行, 老行的 effective_to 置为新行的 effective_from.
+//   单价单位: 元 / 1M tokens (主流厂商对外公布的写法), 缩放成 micro CNY / 1M tokens 存:
+//     1 元 = 1_000_000 微元; 单价 inputPriceMicroPer1M = 元 × 1_000_000.
+//     例: gpt-4o-mini input 公开价折人民币约 1.05 元 / 1M -> 存 1_050_000.
+//
+//   时间窗: effective_to 为 null 表示「截至今天仍有效」.
+// ============================================================
+export const prices = sqliteTable(
+  'prices',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    /** model 字面值 (例: gpt-4o-mini / claude-3-5-sonnet-20241022). 与请求体的 model 字段对齐 */
+    model: text('model').notNull(),
+    /** provider 标识 (例: openai / anthropic / deepseek). 配合 model 唯一确定一行 */
+    provider: text('provider').notNull(),
+    /** input 单价: 微元 / 1M tokens. */
+    inputPriceMicroPer1M: integer('input_price_micro_per_1m').notNull(),
+    /** output 单价: 微元 / 1M tokens. 通常 = input × 3 ~ 5 */
+    outputPriceMicroPer1M: integer('output_price_micro_per_1m').notNull(),
+    /** 模型本身的倍率 (千分位). 比如某模型被运营定为基线 1.2x, 这里写 1200 */
+    modelMultiplier: integer('model_multiplier').notNull().default(1000),
+
+    // ----- v0.10 新增 (cache + batch 单价) -----
+    /**
+     * 缓存命中时的 input 单价: 微元 / 1M tokens. null 时回退到 inputPriceMicroPer1M (无缓存折扣).
+     *   Anthropic prompt caching: cache read = base × 0.1 (https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+     *   OpenAI prompt caching:    cache read = base × 0.5 (https://openai.com/index/api-prompt-caching/)
+     *   Gemini caching:           cache read = base × 0.1 (https://ai.google.dev/gemini-api/docs/pricing)
+     *   DeepSeek context caching: cache hit ≈ base × 0.1 (https://api-docs.deepseek.com/news/news0802)
+     */
+    cacheInputPriceMicroPer1M: integer('cache_input_price_micro_per_1m'),
+    /** batch 通道的 input 单价: 微元 / 1M tokens. null 时表示该 model 不支持 batch */
+    batchInputPriceMicroPer1M: integer('batch_input_price_micro_per_1m'),
+    /** batch 通道的 output 单价: 微元 / 1M tokens. null 时表示该 model 不支持 batch */
+    batchOutputPriceMicroPer1M: integer('batch_output_price_micro_per_1m'),
+
+    /** 价格生效起始时间 (unix ms) */
+    effectiveFrom: integer('effective_from').notNull(),
+    /** 价格失效时间 (unix ms); null 表示一直有效 */
+    effectiveTo: integer('effective_to'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (table) => ({
+    /** 高频查询: 按 (model, provider) 查当前有效价格 */
+    modelProviderIdx: index('prices_model_provider_idx').on(table.model, table.provider),
+  }),
+);
+
+// ============================================================
+// usage_records: 每次请求的账单
+//
+//   生命周期 (status 字段):
+//     reserved  -> preConsume 完成, 已预扣余额, 等待上游响应
+//     finalized -> postConsume 完成, 真实 usage 已结算, 补差完毕
+//     refunded  -> 上游失败或拒绝, 预扣全额退回, 不计费
+//     failed    -> postConsume 阶段出现异常, 但预扣已扣 (留待人工对账)
+//
+//   关键字段:
+//     trace_id          : 贯穿请求全链路, 后续 Ch9 看板按它反查
+//     pre_reserved_cost : preConsume 实际扣掉的余额 (微元)
+//     final_cost        : postConsume 算出的真实成本 (微元); 流式中途断开时
+//                         反映「已收到的 token 对应的实结金额」
+//     prompt_cost / completion_cost : 拆开记, 便于后续按维度审计
+//     prompt_tokens / completion_tokens : 真实 token (上游 usage 返回的; 流式累加得到)
+//     estimated_prompt_tokens : tiktoken 本地估算的 input token, 与上游 usage 对账用
+//     multiplier_snapshot : 当次请求生效的「user × channel × model」三合一倍率快照
+//                           (整数乘积; 不能存指针, 后续运营改倍率不能改写历史账单)
+// ============================================================
+export const usageRecords = sqliteTable(
+  'usage_records',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+
+    /** 链路追踪 ID, 一次请求一个. hex(16) 32 字符 */
+    traceId: text('trace_id').notNull(),
+
+    /** 归因维度 */
+    userId: integer('user_id').notNull(),
+    orgId: integer('org_id').notNull(),
+    keyId: integer('key_id').notNull(),
+
+    /** 模型 / 渠道 */
+    model: text('model').notNull(),
+    provider: text('provider').notNull(),
+
+    /** 真实 token 数 (上游 usage 返回的; 流式累加得到) */
+    promptTokens: integer('prompt_tokens').notNull().default(0),
+    completionTokens: integer('completion_tokens').notNull().default(0),
+
+    /** 本地 tiktoken 估算的 input token (对账用) */
+    estimatedPromptTokens: integer('estimated_prompt_tokens').notNull().default(0),
+
+    /** 成本拆解 (微元) */
+    promptCost: integer('prompt_cost').notNull().default(0),
+    completionCost: integer('completion_cost').notNull().default(0),
+    finalCost: integer('final_cost').notNull().default(0),
+
+    /** 预扣金额 (微元), 用于 postConsume 时算 delta */
+    preReservedCost: integer('pre_reserved_cost').notNull().default(0),
+
+    /** 三合一倍率快照 (user × channel × model 三个千分位整数的乘积). 1_000_000_000 = 1.0x */
+    multiplierSnapshot: integer('multiplier_snapshot').notNull().default(1_000_000_000),
+
+    /** 状态机: reserved / finalized / refunded / failed */
+    status: text('status').notNull().default('reserved'),
+
+    /** 流式? 用于 Ch7 流式计费闭环对账 */
+    isStream: integer('is_stream', { mode: 'boolean' }).notNull().default(false),
+
+    /** 错误信息 (status = failed 时填) */
+    errorMessage: text('error_message'),
+
+    createdAt: integer('created_at').notNull(),
+    /** 实结时间 (unix ms). status 从 reserved -> finalized 那一刻 */
+    finalizedAt: integer('finalized_at'),
+
+    // ----- v0.9 新增 (可观测性) -----
+    /** 本次请求实际命中的上游 channel id. 故障转移时记最后一次成功的那个 */
+    channelId: integer('channel_id'),
+    /** 上游 fetch 起到 first byte / parse 完成的耗时, 毫秒. 看板按 channel 算 P50/P95 */
+    upstreamLatencyMs: integer('upstream_latency_ms'),
+    /** 本次请求试过的 channel id 列表, JSON 数组字符串. 例: "[2,1]" */
+    attemptedChannels: text('attempted_channels'),
+
+    // ----- v0.10 新增 (cache + batch 计费) -----
+    /**
+     * 上游 usage 里返回的缓存命中 input token 数. 这部分按 cache 单价计费, 剩余按 input 单价.
+     *   Anthropic: usage.cache_read_input_tokens
+     *   OpenAI:    usage.prompt_tokens_details.cached_tokens
+     */
+    cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
+    /** Anthropic 缓存写入 token 数 (usage.cache_creation_input_tokens). 本章 v0.10 计费简化按 input 单价. */
+    cacheWriteTokens: integer('cache_write_tokens').notNull().default(0),
+    /** 是否走 batch 异步通道. true 时 input/output 都按 batch 单价计费 (50% 折扣). */
+    batchMode: integer('batch_mode', { mode: 'boolean' }).notNull().default(false),
+  },
+  (table) => ({
+    traceIdx: uniqueIndex('usage_records_trace_idx').on(table.traceId),
+    userTimeIdx: index('usage_records_user_time_idx').on(table.userId, table.createdAt),
+    keyTimeIdx: index('usage_records_key_time_idx').on(table.keyId, table.createdAt),
+    modelTimeIdx: index('usage_records_model_time_idx').on(table.model, table.createdAt),
+    statusIdx: index('usage_records_status_idx').on(table.status),
+    channelTimeIdx: index('usage_records_channel_time_idx').on(table.channelId, table.createdAt),
+  }),
+);
+
+// ============================================================
+// v0.8 新增: channels + abilities (渠道池 + 反范式索引表)
+//
+// 设计参考:
+//   - one-api model/channel.go::Channel
+//   - one-api model/ability.go::Ability + AddAbilities
+//   - one-api model/cache.go::CacheGetRandomSatisfiedChannel
+//   - one-api monitor/manage.go::ShouldDisableChannel
+//
+// 关键设计:
+//   1. channels.enabled_models 是 JSON 字符串, 不参与运行时选渠道查询;
+//      每次 CRUD 时由 ChannelRegistry 解析并刷新 abilities;
+//   2. abilities 是 (group, model, channel_id) 三元组联合主键的反范式索引表,
+//      运行时按 (group, model) 一次 lookup 即得所有可用 channel;
+//   3. channels.status 三态: active / disabled / probing. health-checker
+//      定期扫 disabled, 通过探活恢复成 active.
+// ============================================================
+export const channels = sqliteTable(
+  'channels',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    /** provider 标识, 决定使用哪个 ProviderAdaptor: openai / deepseek / anthropic / mock */
+    provider: text('provider').notNull(),
+    /** 上游真实 API Key. 教学场景明文存; 生产应加密 (留待 Ch12) */
+    apiKey: text('api_key').notNull(),
+    /** 上游 base URL, 不含 /v1 路径 */
+    baseUrl: text('base_url').notNull(),
+    /** 支持的模型 JSON 数组字符串, 例: ["gpt-4o","gpt-4o-mini"] */
+    enabledModels: text('enabled_models').notNull().default('[]'),
+    /** 用户分组. 简化为单 group, 默认 default */
+    groupName: text('group_name').notNull().default('default'),
+    /** 优先级, 越大越优先 */
+    priority: integer('priority').notNull().default(0),
+    /** 同 priority 内的加权随机权重. 0 = 不参与, >0 按累加权重命中 */
+    weight: integer('weight').notNull().default(1),
+    /** 渠道倍率 (千分位). 1000 = 1.0x */
+    channelMultiplier: integer('channel_multiplier').notNull().default(1000),
+
+    // ----- v0.10 新增 (成本路由 + batch 支持) -----
+    /**
+     * 成本路由档位. 越小越便宜, 默认 100. 主路径选 channel 时按这个字段升序排,
+     * 优先选最便宜的 active channel; 同档位再走 priority + weight.
+     * 与 priority 互补: priority 解决「可用性兜底」, cost_priority 解决「省钱优先」.
+     */
+    costPriority: integer('cost_priority').notNull().default(100),
+    /** 是否支持 batch API. priority=low 的请求会被路由到 supports_batch=1 的 channel. */
+    supportsBatch: integer('supports_batch', { mode: 'boolean' }).notNull().default(false),
+
+    /** 状态机: active / disabled / probing */
+    status: text('status').notNull().default('active'),
+    /** 上次被禁用的时间 (unix ms), health-checker 据此决定冷却时间 */
+    disabledAt: integer('disabled_at'),
+    /** 禁用原因: upstream_401 / upstream_429 / upstream_5xx_streak / manual ... */
+    disabledReason: text('disabled_reason'),
+    /** 最近一次探活时间 (unix ms), 控制最小探活间隔 */
+    lastProbedAt: integer('last_probed_at'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (table) => ({
+    statusIdx: index('channels_status_idx').on(table.status),
+    providerIdx: index('channels_provider_idx').on(table.provider),
+  }),
+);
+
+/**
+ * abilities: (group, model, channel_id) 联合主键的反范式索引表.
+ *
+ * 选渠道的热路径只读这一张表:
+ *   SELECT channel_id, priority, weight FROM abilities
+ *   WHERE group_name = ? AND model = ? AND enabled = 1
+ *   ORDER BY priority DESC;
+ *
+ * CRUD 时由 ChannelRegistry 同步刷新 (channels.enabled_models JSON 数组的笛卡儿积展开).
+ */
+export const abilities = sqliteTable(
+  'abilities',
+  {
+    groupName: text('group_name').notNull(),
+    model: text('model').notNull(),
+    channelId: integer('channel_id').notNull(),
+    /** 冗余 priority, 与 channels.priority 保持同步 */
+    priority: integer('priority').notNull().default(0),
+    /** 冗余 weight, 与 channels.weight 保持同步 */
+    weight: integer('weight').notNull().default(1),
+    /** channel.status != 'active' 时, 这一行 enabled 置 false */
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  },
+  (table) => ({
+    lookupIdx: index('abilities_lookup_idx').on(
+      table.groupName,
+      table.model,
+      table.enabled,
+      table.priority,
+    ),
+  }),
+);
+
+// ============================================================
+// v0.11 新增: 钱包 + 充值流水 + 退款流水
+//
+// 设计原则:
+//   1. wallets 与 users 1:1 (一个 user 一个 wallet);
+//   2. balance_micro 是「可用余额」, frozen_micro 是「冻结但未释放」(退款待回退、提现挂起);
+//   3. 余额扣减一律用乐观锁:
+//        UPDATE wallets SET balance_micro = balance_micro - ?
+//          WHERE id = ? AND balance_micro >= ?
+//      失败 (returning 0 行) = 余额不足 / 被并发请求先扣到了, 业务返 402.
+//   4. 充值幂等的锚点是 recharges.out_trade_no UNIQUE 索引: 重复回调时 INSERT 撞约束,
+//      捕获后做状态机判断, 直接返回 success;
+//   5. 退款幂等的锚点是 refunds.refund_no UNIQUE 索引, 与 recharges 同构.
+//
+// 与 v0.5 users.balance_micro 的关系:
+//   - users.balance_micro 仍然保留 (兼容老数据), 但生产路径不再从这里扣;
+//   - billing/calculator.ts 改为先 ensure wallet 存在 (cli/seed-wallet.ts 一次性建好),
+//     之后所有扣减都走 wallet.balance_micro;
+//   - users.balance_micro 字段在本章 v0.11 之后视为 deprecated, v1.0 整合时彻底移除.
+// ============================================================
+
+/**
+ * wallets: 用户钱包. 一个 user 一个 wallet.
+ *
+ * 字段含义:
+ *   - balance_micro: 可用余额 (微元), 1 元 = 1_000_000 微元.
+ *     扣减用乐观锁: UPDATE WHERE balance_micro >= ?, 单 SQL 原子完成「检查 + 扣减」.
+ *   - frozen_micro:  冻结余额 (微元). 本章 v0.11 不实现「冻结业务」, 字段为后续提现 / 退款待回退预留.
+ */
+export const wallets = sqliteTable(
+  'wallets',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id),
+    /** 可用余额 (微元) */
+    balanceMicro: integer('balance_micro').notNull().default(0),
+    /** 冻结余额 (微元), 本章 v0.11 不写入, 留作扩展 */
+    frozenMicro: integer('frozen_micro').notNull().default(0),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (table) => ({
+    userIdx: uniqueIndex('wallets_user_id_idx').on(table.userId),
+  }),
+);
+
+/**
+ * recharges: 充值流水. 一笔订单一行.
+ *
+ * 状态机 (status):
+ *   pending     -- createOrder 后写入, 等待支付平台异步回调
+ *   succeeded   -- 收到验签通过的成功回调 + 已执行入账 (wallet.balance += amount)
+ *   failed      -- 收到验签通过的失败回调 (用户取消 / 支付失败 / 超时关闭)
+ *   refunded    -- 已被全额退款 (refunds 表里有对应 refund_no, status=succeeded)
+ *
+ * 关键字段:
+ *   - out_trade_no: 网关侧生成的全局唯一商户订单号. 一切支付平台都要把它带回来.
+ *                   字段加 UNIQUE 索引, 重复回调时 INSERT 撞约束, 业务层判定后直接返 success.
+ *   - raw_payload:  支付平台的回调原文 (JSON 字符串), 留作审计 + 对账.
+ *
+ * 设计参考:
+ *   - new-api model/topup.go::TopUp 的 TradeNo / Status / PaymentProvider 字段
+ *   - new-api controller/topup.go::EpayNotify 验签 + LockOrder 流程 (本书用 DB 唯一索引代替全局锁)
+ */
+export const recharges = sqliteTable(
+  'recharges',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    walletId: integer('wallet_id')
+      .notNull()
+      .references(() => wallets.id),
+    /** 冗余 user_id, 看板按用户聚合不需要 join wallets */
+    userId: integer('user_id').notNull(),
+    /** 网关侧生成的商户订单号, 全平台唯一. ★ 充值幂等的锚点 */
+    outTradeNo: text('out_trade_no').notNull(),
+    /** 支付平台标识: mock / stripe / alipay / wechat ... */
+    provider: text('provider').notNull(),
+    /** 充值金额 (微元) */
+    amountMicro: integer('amount_micro').notNull(),
+    /** 状态机: pending / succeeded / failed / refunded */
+    status: text('status').notNull().default('pending'),
+    /** 支付平台回调的原文 (JSON), 审计 + 对账用 */
+    rawPayload: text('raw_payload'),
+    createdAt: integer('created_at').notNull(),
+    /** 状态变成终态 (succeeded / failed / refunded) 的时间 */
+    completedAt: integer('completed_at'),
+  },
+  (table) => ({
+    outTradeIdx: uniqueIndex('recharges_out_trade_no_idx').on(table.outTradeNo),
+    walletStatusIdx: index('recharges_wallet_status_idx').on(table.walletId, table.status),
+    statusCreatedIdx: index('recharges_status_created_idx').on(table.status, table.createdAt),
+  }),
+);
+
+/**
+ * refunds: 退款流水. 一次退款一行.
+ *
+ * 状态机 (status):
+ *   pending     -- admin 触发后写入, 已 call adapter.refund(), 等待异步回调
+ *   succeeded   -- 平台回调确认退款成功, 已执行回退 (wallet.balance -= amount)
+ *   failed      -- 平台回调拒绝 (例如已退过 / 单据不存在 / 超时关闭)
+ *
+ * 关于退款时余额扣穿:
+ *   退款执行时若 wallet.balance < amount, 说明用户已经把这笔钱花掉了. 业务策略两种:
+ *     a. 强制扣穿 (允许 balance 为负, 后续充值优先抵扣); -- 本章 v0.11 选这种, 简化教学
+ *     b. 先 freeze 待用户后续充值时自动抵扣;
+ */
+export const refunds = sqliteTable(
+  'refunds',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    rechargeId: integer('recharge_id')
+      .notNull()
+      .references(() => recharges.id),
+    /** 网关侧生成的退款单号, 与 out_trade_no 类比. ★ 退款幂等的锚点 */
+    refundNo: text('refund_no').notNull(),
+    /** 退款金额 (微元), 教学版本只支持整笔退, 必须 = recharges.amount_micro */
+    amountMicro: integer('amount_micro').notNull(),
+    /** 退款原因, 运营 / 客服记录 */
+    reason: text('reason'),
+    /** 状态机: pending / succeeded / failed */
+    status: text('status').notNull().default('pending'),
+    /** 平台回调原文 (JSON), 对账用 */
+    rawPayload: text('raw_payload'),
+    createdAt: integer('created_at').notNull(),
+    completedAt: integer('completed_at'),
+  },
+  (table) => ({
+    refundNoIdx: uniqueIndex('refunds_refund_no_idx').on(table.refundNo),
+    rechargeStatusIdx: index('refunds_recharge_status_idx').on(table.rechargeId, table.status),
+  }),
+);
+
+// ============================================================
+// 运行时类型
+// ============================================================
+export type Org = typeof orgs.$inferSelect;
+export type NewOrg = typeof orgs.$inferInsert;
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+export type Key = typeof keys.$inferSelect;
+export type NewKey = typeof keys.$inferInsert;
+export type Price = typeof prices.$inferSelect;
+export type NewPrice = typeof prices.$inferInsert;
+export type UsageRecord = typeof usageRecords.$inferSelect;
+export type NewUsageRecord = typeof usageRecords.$inferInsert;
+export type Channel = typeof channels.$inferSelect;
+export type NewChannel = typeof channels.$inferInsert;
+export type Ability = typeof abilities.$inferSelect;
+export type NewAbility = typeof abilities.$inferInsert;
+export type Wallet = typeof wallets.$inferSelect;
+export type NewWallet = typeof wallets.$inferInsert;
+export type Recharge = typeof recharges.$inferSelect;
+export type NewRecharge = typeof recharges.$inferInsert;
+export type Refund = typeof refunds.$inferSelect;
+export type NewRefund = typeof refunds.$inferInsert;

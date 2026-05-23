@@ -1,0 +1,41 @@
+{
+  "name": "ch07-stream-is-broken",
+  "version": "0.7.0",
+  "private": true,
+  "description": "《AI Token 中转站实战》第 7 章配套示例：SSE 流式透传 + AbortController 反向取消 + 流式 token 计费闭环",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "migrate": "tsx src/db/migrate.ts",
+    "drizzle:generate": "drizzle-kit generate",
+    "issue-key": "tsx src/cli/issue-key.ts",
+    "attack": "tsx src/scripts/attack.ts",
+    "mock": "tsx src/scripts/mock-upstream.ts",
+    "stream-test": "tsx src/scripts/stream-test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "better-sqlite3": "^12.10.0",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.3",
+    "hono": "^4.6.14",
+    "js-tiktoken": "^1.0.21",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "autocannon": "^7.15.0",
+    "drizzle-kit": "^0.30.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

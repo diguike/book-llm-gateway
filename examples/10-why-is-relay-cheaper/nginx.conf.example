@@ -1,0 +1,42 @@
+# Nginx 反代 SSE 流式响应的最小配置
+#
+# 关键问题: 默认 Nginx 会对上游响应做 proxy_buffering, 把一段 chunk 攒到一定大小
+# 才一次性 flush 给下游, 导致客户端看到「卡 N 秒一次性吐」的现象, 反向取消也无法及时.
+# 必须把缓冲关掉, 同时把读超时拉长 (流式响应可能 30+ 秒沉默).
+
+server {
+    listen 443 ssl http2;
+    server_name api.example.com;
+
+    # ssl_certificate / ssl_certificate_key 略...
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # ============================================================
+        # 流式关键配置 (没有这几行, 流式会被卡 30 秒一次性吐)
+        # ============================================================
+
+        # 关掉响应缓冲: 上游一个 chunk 进来立刻 flush 给客户端
+        proxy_buffering off;
+        # 也关掉请求缓冲, 让上游 (本机网关) 立刻拿到客户端的 close 信号
+        proxy_request_buffering off;
+
+        # 长流式响应 (reasoning 模型可能 1 分钟沉默) 不能被超时切断
+        # 我们的网关 SSE 每 15s 发心跳, 这里给 90s 余量
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+
+        # HTTP/1.1 的 chunked transfer 必须关闭 close-on-EOF
+        proxy_set_header Connection '';
+
+        # 兜底: 即使忘加 proxy_buffering off, 我们的网关响应头里也带了
+        # X-Accel-Buffering: no, Nginx 会针对该响应单独关闭缓冲.
+    }
+}

@@ -1,0 +1,100 @@
+# v1.0 完整 demo 环境: gateway + mock-upstream + mock-payment-platform
+#
+# 一条 `docker compose up` 起整套, 不需要外网, 不需要任何真实 SDK.
+#
+# 数据持久化: gateway 服务把 ./data 挂进 /app/data, SQLite 文件落到宿主机, 重启不丢.
+#
+# 端口约定:
+#   gateway        :3000  -> 主网关
+#   mock-upstream  :4010  -> 假装 OpenAI 的 SSE 上游
+#   mock-payment   :5010  -> 假装支付平台的回调 server
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-gateway:v1.0
+    container_name: llm-gateway
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: dev
+      PORT: 3000
+      LOG_LEVEL: info
+      DATABASE_URL: /app/data/gateway.db
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-change-me}
+      # 在 docker network 里, 服务名就是 hostname
+      MOCK_BASE_URL: http://mock-upstream:4010
+      MOCK_PAY_BASE_URL: http://mock-payment:5010
+      # mock-payment 回调网关时也要走 docker network 内的 hostname
+      PAYMENT_NOTIFY_BASE: http://gateway:3000
+      MOCK_PAY_SECRET: ${MOCK_PAY_SECRET:-test-mock-secret}
+      INITIAL_BALANCE_CNY: 100
+      READINESS_REQUIRE_WALLET: 'true'
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      mock-upstream:
+        condition: service_healthy
+      mock-payment:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ['CMD', 'node', '-e', "fetch('http://localhost:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  mock-upstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-gateway:v1.0
+    container_name: llm-gateway-mock-upstream
+    command: ['npx', 'tsx', 'src/scripts/mock-upstream.ts']
+    environment:
+      MOCK_PORT: 4010
+      MOCK_CHUNK_INTERVAL_MS: 250
+      # mock-upstream 不连 SQLite, 但 env.ts 校验需要这些字段, 给最小可通过值
+      DATABASE_URL: /tmp/unused.db
+      ADMIN_TOKEN: ignored-by-mock-upstream
+    ports:
+      - '4010:4010'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:4010/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer mock'},body:JSON.stringify({stream:false,model:'mock-gpt-4o-mini',messages:[{role:'user',content:'ping'}]})}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  mock-payment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-gateway:v1.0
+    container_name: llm-gateway-mock-payment
+    command: ['npx', 'tsx', 'src/scripts/mock-payment-platform.ts']
+    environment:
+      MOCK_PAY_PORT: 5010
+      MOCK_PAY_SECRET: ${MOCK_PAY_SECRET:-test-mock-secret}
+      MOCK_PAY_AUTO_DELAY_MS: 3000
+      MOCK_PAY_REFUND_DELAY_MS: 2000
+      MOCK_PAY_RETRY_MS: 0
+      DATABASE_URL: /tmp/unused.db
+      ADMIN_TOKEN: ignored-by-mock-payment
+    ports:
+      - '5010:5010'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:5010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  gateway-data:

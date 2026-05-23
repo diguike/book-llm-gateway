@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>SSE 打字机 demo</title>
+    <style>
+      body { font: 14px/1.6 -apple-system, sans-serif; padding: 24px; max-width: 720px; }
+      textarea { width: 100%; box-sizing: border-box; padding: 8px; }
+      pre { background: #f5f5f5; padding: 12px; min-height: 120px; white-space: pre-wrap; word-break: break-word; }
+      .row { display: flex; gap: 8px; margin: 8px 0; }
+      input { padding: 6px 8px; flex: 1; }
+      button { padding: 8px 16px; cursor: pointer; }
+      .meta { color: #888; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h2>SSE 打字机 demo</h2>
+    <div class="row">
+      <input id="base" value="http://localhost:3000" />
+      <input id="model" value="mock-gpt-4o-mini" />
+    </div>
+    <div class="row">
+      <input id="key" placeholder="sk-gw-..." />
+    </div>
+    <textarea id="prompt" rows="3">Tell me a story.</textarea>
+    <div class="row">
+      <button id="send">发送</button>
+      <button id="stop" disabled>Ctrl+C / 取消</button>
+    </div>
+    <pre id="out"></pre>
+    <div class="meta" id="meta"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let ctrl = null;
+
+      $('send').onclick = async () => {
+        $('out').textContent = '';
+        $('meta').textContent = '';
+        $('stop').disabled = false;
+        ctrl = new AbortController();
+        const startedAt = Date.now();
+        let firstDeltaAt = 0;
+        let chunkCount = 0;
+
+        try {
+          const resp = await fetch(`${$('base').value}/v1/chat/completions`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${$('key').value}`,
+              'Content-Type': 'application/json',
+              Accept: 'text/event-stream',
+            },
+            body: JSON.stringify({
+              model: $('model').value,
+              messages: [{ role: 'user', content: $('prompt').value }],
+              stream: true,
+              max_tokens: 256,
+            }),
+            signal: ctrl.signal,
+          });
+          if (!resp.ok || !resp.body) {
+            $('out').textContent = await resp.text();
+            return;
+          }
+          const reader = resp.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const ev = buf.slice(0, i);
+              buf = buf.slice(i + 2);
+              for (const ln of ev.split('\n')) {
+                const t = ln.trim();
+                if (!t.startsWith('data:')) continue;
+                const d = t.slice(5).trim();
+                if (d === '[DONE]') {
+                  $('meta').textContent = `done. chunks=${chunkCount} first_delta=${firstDeltaAt - startedAt}ms total=${Date.now() - startedAt}ms`;
+                  return;
+                }
+                try {
+                  const o = JSON.parse(d);
+                  const c = o.choices && o.choices[0] && o.choices[0].delta && o.choices[0].delta.content;
+                  if (c) {
+                    if (!firstDeltaAt) firstDeltaAt = Date.now();
+                    chunkCount++;
+                    $('out').textContent += c;
+                  }
+                } catch {}
+              }
+            }
+          }
+        } catch (e) {
+          $('meta').textContent = `aborted: ${e.message}`;
+        } finally {
+          $('stop').disabled = true;
+        }
+      };
+
+      $('stop').onclick = () => {
+        if (ctrl) ctrl.abort();
+        $('meta').textContent = 'aborted by user (reverse-cancellation should fire on the gateway)';
+      };
+    </script>
+  </body>
+</html>
