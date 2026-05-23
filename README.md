@@ -2,6 +2,9 @@
 title: AI Token 中转站实战：从 0 搭建企业级 LLM 网关
 ---
 
+> 在线阅读 · [inferloop.dev/llm-gateway](https://inferloop.dev/llm-gateway)  
+> 所有书目 · [inferloop.dev](https://inferloop.dev)
+
 ## 这本书在讲什么
 
 用 TypeScript 从零搭一个企业级 LLM API 中转站（也叫 AI Gateway）。
@@ -32,3 +35,18 @@ title: AI Token 中转站实战：从 0 搭建企业级 LLM 网关
 
 每章对应 `book/NN-xxx/examples/` 一份可独立运行的最小示例，
 全书最后一章会汇总成一个能本地跑起来的最小原型。
+
+
+## 相关书
+
+来自同一作者的其他书:
+
+- [《Hermes Agent 源码解读》](https://inferloop.dev/hermes-agent)
+- [《LLM Infra 工程实战》](https://inferloop.dev/llm-infra)
+- [《Agent Memory 工程实战》](https://inferloop.dev/claude-mem)
+- [《百万级 AI Agent 平台架构》](https://inferloop.dev/enterprise-agent)
+- [《OpenClaw 源码解析》](https://inferloop.dev/openclaw)
+- [《Transformer 教学》](https://inferloop.dev/transformer)
+- [《Claude Code Skill 开发指南》](https://inferloop.dev/claude-skill)
+- [《Claude 插件官方指南》](https://inferloop.dev/claude-plugins)
+- [《自己动手写 AI Agent》](https://inferloop.dev/ling-agent)

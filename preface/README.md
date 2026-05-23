@@ -4,6 +4,10 @@ feishu_url: "https://www.feishu.cn/wiki/ZvV5wPXPeiQ5BPkH9OLcXaqRnOf"
 last_synced: "2026-05-16T18:28:20"
 ---
 
+> **配套资源**  
+> 源码仓库 · [github.com/diguike/book-llm-gateway](https://github.com/diguike/book-llm-gateway)  
+> 在线阅读 · [inferloop.dev/llm-gateway](https://inferloop.dev/llm-gateway)
+
 ## 一笔 8 万元的 OpenAI 账单
 
 2025 年某个月初，一位朋友的财务找到他，问「这个月公司 OpenAI 账单 8 万元，能不能拆出每个团队各花了多少」。他打开后台看了五分钟，给出的答案是「拆不出来」——所有业务线共用同一把上游 Key，账单只有一个总数。两周后，一名新入职的工程师不小心把这把 Key 提交到了公开仓库，安全团队要求立刻吊销，于是公司里所有依赖 LLM 的服务在那一刻同时下线，等到新 Key 重新分发完毕、所有服务重启完成，已经过去了 40 分钟。
