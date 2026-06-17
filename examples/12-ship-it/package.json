@@ -20,8 +20,6 @@
     "attack": "tsx src/scripts/attack.ts",
     "stream-test": "tsx src/scripts/stream-test.ts",
     "failover-test": "tsx src/scripts/failover-test.ts",
-    "cost-router-test": "tsx src/scripts/cost-router-test.ts",
-    "cache-test": "tsx src/scripts/cache-test.ts",
     "payment-flow-test": "tsx src/scripts/payment-flow-test.ts",
     "wallet-concurrency-test": "tsx src/scripts/wallet-concurrency-test.ts",
     "docker:build": "docker build -t llm-gateway:v1.0 .",

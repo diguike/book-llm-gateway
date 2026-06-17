@@ -15,9 +15,7 @@
     "attack": "tsx src/scripts/attack.ts",
     "mock": "tsx src/scripts/mock-upstream.ts",
     "stream-test": "tsx src/scripts/stream-test.ts",
-    "failover-test": "tsx src/scripts/failover-test.ts",
-    "cost-router-test": "tsx src/scripts/cost-router-test.ts",
-    "cache-test": "tsx src/scripts/cache-test.ts"
+    "failover-test": "tsx src/scripts/failover-test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
