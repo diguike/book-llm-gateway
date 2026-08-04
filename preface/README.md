@@ -25,7 +25,7 @@ last_synced: "2026-05-16T18:28:20"
 适合阅读的读者：
 
 - 1-3 年 Node.js / TypeScript 后端经验的工程师，想理解中转站背后的工程原理
-- 用过 OpenAI / Anthropic API、想给公司搭一套内部 LLM 网关的应用层全栈工程师
+- 用过 OpenAI / Anthropic / [百炼](https://www.aliyun.com/benefit/ai/aistar?userCode=okjhlpr5) 这类模型 API、想给公司搭一套内部 LLM 网关的应用层全栈工程师
 - 想自己跑一个对外中转站的个体开发者，需要先把合规边界和核心机制看清楚
 - 已经在用 one-api / Portkey 但想读懂源码、做二次开发的运营方
 
