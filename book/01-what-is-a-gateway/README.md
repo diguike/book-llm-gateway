@@ -121,6 +121,7 @@ LLM 网关赛道已经有不少开源项目，本书的角色不是再造一个�
 | [Portkey](https://github.com/Portkey-AI/gateway) | TypeScript | 主参考（跟读源码） | 栈一致（Hono + TS），本书的 Provider 抽象、SSE 透传层、内存限流实现都参考其 v1.15.2 版本的源码组织方式。 |
 | [Helicone](https://github.com/Helicone/helicone) | TypeScript | 偶尔查阅 | 代理 + 可观测平台。本书的可观测章节（第 9 章）参考其 Manager + Store 拆分模式。 |
 | [LiteLLM](https://github.com/BerriAI/litellm) | Python | 偶尔查阅 | provider 抽象设计最完整的实现，但语言不同。本书的 `ProviderAdaptor` 接口设计参考其 `BaseConfig` 抽象。 |
+| [Bifrost](https://github.com/maximhq/bifrost) | Go | 生产网关参考 | 高性能、OpenAI 兼容的多 provider AI 网关，支持自动故障转移、负载均衡、语义缓存与治理能力，可作为生产级实现的对照。 |
 
 简单概括四家项目的定位：
 
